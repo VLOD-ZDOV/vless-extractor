@@ -1,0 +1,13 @@
+# Binaries
+vless-extract
+vless-extract.exe
+*.tar.gz
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE / System
+.DS_Store
+*.log
