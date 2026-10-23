@@ -2,6 +2,20 @@
 
 A cross-platform utility (Windows & Linux) to extract raw `vless://` and `hysteria2://` links from subscription endpoints, Base64 data, local files, and Sing-Box / Xray JSON configurations.
 
+## Quick Install (One-Liner)
+
+### Linux & macOS (Bash)
+```bash
+curl -fsSL https://raw.githubusercontent.com/VLOD-ZDOV/vless-extractor/master/install.sh | bash
+```
+
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/VLOD-ZDOV/vless-extractor/master/install.ps1 | iex
+```
+
+---
+
 ## Features
 
 - **Multi-Protocol Support**:
@@ -24,28 +38,28 @@ A cross-platform utility (Windows & Linux) to extract raw `vless://` and `hyster
 
 ```bash
 # Basic extraction (extracts VLESS, auto-falls back to Hysteria 2 if no VLESS present)
-./vless-extract "https://example.com/sub/token123"
+vless-extract "https://example.com/sub/token123"
 
 # Include both VLESS and Hysteria 2 links
-./vless-extract -all "https://example.com/sub/token123"
+vless-extract -all "https://example.com/sub/token123"
 
 # Extract only Hysteria 2 links
-./vless-extract -hy2-only "https://example.com/sub/token123"
+vless-extract -hy2-only "https://example.com/sub/token123"
 
 # Save directly to a file
-./vless-extract -o links.txt "https://example.com/sub/token123"
+vless-extract -o links.txt "https://example.com/sub/token123"
 
 # Verbose output with node remarks
-./vless-extract -v "https://example.com/sub/token123"
+vless-extract -v "https://example.com/sub/token123"
 
 # Decode URL-encoded remark names in the #fragment
-./vless-extract -d "https://example.com/sub/token123"
+vless-extract -d "https://example.com/sub/token123"
 
 # Custom HWID (device identifier)
-./vless-extract -hwid "a1b2c3d4e5f60718293a4b5c6d7e8f90" "https://example.com/sub/token123"
+vless-extract -hwid "a1b2c3d4e5f60718293a4b5c6d7e8f90" "https://example.com/sub/token123"
 
 # Pipe / stdin support
-curl -s "https://example.com/sub/token123" | ./vless-extract
+curl -s "https://example.com/sub/token123" | vless-extract
 ```
 
 ### Windows (CMD / PowerShell)
