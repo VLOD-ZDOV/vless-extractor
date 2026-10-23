@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VLESS Link Extractor
-Extracts vless:// links from subscription URLs, Base64 strings, files,
-and Sing-Box / Xray JSON configurations.
+VLESS & Hysteria 2 Link Extractor
+Extracts vless:// and hysteria2:// links from subscription URLs,
+Base64 strings, files, and Sing-Box / Xray JSON configurations.
 """
 
 import sys
@@ -15,9 +15,10 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import argparse
-from typing import List
+from typing import List, Tuple
 
 VLESS_REGEX = re.compile(r"vless://[^\s\"\'<>]+")
+HY2_REGEX = re.compile(r"(?:hysteria2|hy2)://[^\s\"\'<>]+")
 
 USER_AGENTS = [
     "v2rayN/6.40",
@@ -76,14 +77,15 @@ def try_decode_base64(text: str) -> str:
         try:
             decoded = fn(clean.encode("ascii", errors="ignore"))
             decoded_text = decoded.decode("utf-8")
-            if any(c in decoded_text for c in ("vless://", "vmess://", "trojan://", "ss://", "hysteria", "outbounds")):
+            if any(c in decoded_text for c in ("vless://", "hysteria", "vmess://", "trojan://", "ss://", "outbounds")):
                 return decoded_text
         except Exception:
             continue
     return ""
 
-def parse_xray_json(content: str) -> List[str]:
-    links = []
+def parse_xray_json(content: str) -> Tuple[List[str], List[str]]:
+    vless_links = []
+    hy2_links = []
     try:
         data = json.loads(content)
         items = data if isinstance(data, list) else [data]
@@ -97,155 +99,183 @@ def parse_xray_json(content: str) -> List[str]:
                 continue
 
             for ob in outbounds:
-                if not isinstance(ob, dict) or ob.get("protocol") != "vless":
+                if not isinstance(ob, dict):
                     continue
+                proto = ob.get("protocol")
                 tag = remarks or ob.get("tag", "")
 
                 settings = ob.get("settings", {})
-                vnext = settings.get("vnext", [])
                 ss = ob.get("streamSettings", {})
-                network = ss.get("network", "tcp")
-                security = ss.get("security", "none")
 
-                for vn in vnext:
-                    address = vn.get("address")
-                    port = vn.get("port", 443)
-                    if not address or address == "0.0.0.0":
-                        continue
-
-                    for u in vn.get("users", []):
-                        uuid = u.get("id")
-                        if not uuid or uuid == "00000000-0000-0000-0000-000000000000":
+                if proto == "vless":
+                    network = ss.get("network", "tcp")
+                    security = ss.get("security", "none")
+                    vnext = settings.get("vnext", [])
+                    for vn in vnext:
+                        address = vn.get("address")
+                        port = vn.get("port", 443)
+                        if not address or address == "0.0.0.0":
                             continue
+                        for u in vn.get("users", []):
+                            uuid = u.get("id")
+                            if not uuid or uuid == "00000000-0000-0000-0000-000000000000":
+                                continue
+                            params = {"encryption": u.get("encryption", "none")}
+                            if u.get("flow"): params["flow"] = u.get("flow")
+                            params["type"] = network
+                            params["security"] = security
 
-                        params = {"encryption": u.get("encryption", "none")}
-                        if u.get("flow"):
-                            params["flow"] = u.get("flow")
-                        params["type"] = network
-                        params["security"] = security
+                            if security == "reality":
+                                rs = ss.get("realitySettings", {})
+                                if rs.get("serverName"): params["sni"] = rs["serverName"]
+                                if rs.get("publicKey"): params["pbk"] = rs["publicKey"]
+                                if rs.get("shortId"): params["sid"] = rs["shortId"]
+                                if rs.get("fingerprint"): params["fp"] = rs["fingerprint"]
+                                if rs.get("spiderX"): params["spx"] = rs["spiderX"]
+                            elif security == "tls":
+                                ts = ss.get("tlsSettings", {})
+                                if ts.get("serverName"): params["sni"] = ts["serverName"]
+                                if ts.get("fingerprint"): params["fp"] = ts["fingerprint"]
 
-                        if security == "reality":
-                            rs = ss.get("realitySettings", {})
-                            if rs.get("serverName"): params["sni"] = rs["serverName"]
-                            if rs.get("publicKey"): params["pbk"] = rs["publicKey"]
-                            if rs.get("shortId"): params["sid"] = rs["shortId"]
-                            if rs.get("fingerprint"): params["fp"] = rs["fingerprint"]
-                            if rs.get("spiderX"): params["spx"] = rs["spiderX"]
-                        elif security == "tls":
-                            ts = ss.get("tlsSettings", {})
-                            if ts.get("serverName"): params["sni"] = ts["serverName"]
-                            if ts.get("fingerprint"): params["fp"] = ts["fingerprint"]
+                            if network == "ws":
+                                ws = ss.get("wsSettings", {})
+                                if ws.get("path"): params["path"] = ws["path"]
+                                if ws.get("headers", {}).get("Host"): params["host"] = ws["headers"]["Host"]
+                            elif network == "grpc":
+                                gs = ss.get("grpcSettings", {})
+                                if gs.get("serviceName"): params["serviceName"] = gs["serviceName"]
+                            elif network in ("xhttp", "splithttp"):
+                                xs = ss.get("xhttpSettings", {})
+                                if xs.get("path"): params["path"] = xs["path"]
+                                if xs.get("host"): params["host"] = xs["host"]
+                                if xs.get("mode"): params["mode"] = xs["mode"]
 
-                        if network == "ws":
-                            ws = ss.get("wsSettings", {})
-                            if ws.get("path"): params["path"] = ws["path"]
-                            if ws.get("headers", {}).get("Host"): params["host"] = ws["headers"]["Host"]
-                        elif network == "grpc":
-                            gs = ss.get("grpcSettings", {})
-                            if gs.get("serviceName"): params["serviceName"] = gs["serviceName"]
-                        elif network in ("xhttp", "splithttp"):
-                            xs = ss.get("xhttpSettings", {})
-                            if xs.get("path"): params["path"] = xs["path"]
-                            if xs.get("host"): params["host"] = xs["host"]
-                            if xs.get("mode"): params["mode"] = xs["mode"]
+                            final_tag = tag or address
+                            qs = urllib.parse.urlencode(params)
+                            vless_links.append(f"vless://{uuid}@{address}:{port}?{qs}#{urllib.parse.quote(final_tag)}")
 
-                        final_tag = tag or address
-                        qs = urllib.parse.urlencode(params)
-                        tag_enc = urllib.parse.quote(final_tag)
-                        links.append(f"vless://{uuid}@{address}:{port}?{qs}#{tag_enc}")
+                elif proto in ("hysteria", "hysteria2"):
+                    addr = settings.get("address")
+                    port = settings.get("port", 443)
+                    if not addr or addr == "0.0.0.0":
+                        continue
+                    hs = ss.get("hysteriaSettings", {})
+                    auth = hs.get("auth", settings.get("auth", ""))
+                    tls = ss.get("tlsSettings", {})
+                    sni = tls.get("serverName", addr)
+                    q = {"sni": sni}
+                    if tls.get("alpn"):
+                        q["alpn"] = ",".join(tls["alpn"])
+                    final_tag = tag or addr
+                    auth_prefix = f"{auth}@" if auth else ""
+                    qs = urllib.parse.urlencode(q)
+                    hy2_links.append(f"hysteria2://{auth_prefix}{addr}:{port}/?{qs}#{urllib.parse.quote(final_tag)}")
     except Exception:
         pass
-    return links
+    return vless_links, hy2_links
 
-def parse_singbox_json(content: str) -> List[str]:
-    links = []
+def parse_singbox_json(content: str) -> Tuple[List[str], List[str]]:
+    vless_links = []
+    hy2_links = []
     try:
         data = json.loads(content)
         outbounds = data.get("outbounds", [])
         if not isinstance(outbounds, list):
-            return []
+            return [], []
 
         for ob in outbounds:
-            if not isinstance(ob, dict) or ob.get("type") != "vless":
+            if not isinstance(ob, dict):
                 continue
             server = ob.get("server")
-            uuid = ob.get("uuid")
             port = ob.get("server_port", 443)
             tag = ob.get("tag", server)
-            if not server or server == "0.0.0.0" or not uuid or uuid == "00000000-0000-0000-0000-000000000000":
+            if not server or server == "0.0.0.0":
                 continue
 
-            query = {"encryption": "none"}
-            if "flow" in ob and ob["flow"]:
-                query["flow"] = ob["flow"]
+            ob_type = ob.get("type")
+            if ob_type == "vless":
+                uuid = ob.get("uuid")
+                if not uuid or uuid == "00000000-0000-0000-0000-000000000000":
+                    continue
+                query = {"encryption": "none"}
+                if ob.get("flow"): query["flow"] = ob["flow"]
+                transport = ob.get("transport", {})
+                query["type"] = transport.get("type", ob.get("network", "tcp"))
+                if "path" in transport: query["path"] = transport["path"]
+                if "host" in transport: query["host"] = transport["host"]
 
-            transport = ob.get("transport", {})
-            net_type = transport.get("type", ob.get("network", "tcp"))
-            query["type"] = net_type
-            if "path" in transport:
-                query["path"] = transport["path"]
-            if "host" in transport:
-                query["host"] = transport["host"]
-
-            tls = ob.get("tls", {})
-            if tls.get("enabled"):
-                reality = tls.get("reality", {})
-                if reality.get("enabled"):
-                    query["security"] = "reality"
-                    if "public_key" in reality:
-                        query["pbk"] = reality["public_key"]
-                    if "short_id" in reality:
-                        query["sid"] = reality["short_id"]
+                tls = ob.get("tls", {})
+                if tls.get("enabled"):
+                    reality = tls.get("reality", {})
+                    if reality.get("enabled"):
+                        query["security"] = "reality"
+                        if "public_key" in reality: query["pbk"] = reality["public_key"]
+                        if "short_id" in reality: query["sid"] = reality["short_id"]
+                    else:
+                        query["security"] = "tls"
+                    if "server_name" in tls: query["sni"] = tls["server_name"]
+                    utls = tls.get("utls", {})
+                    if utls.get("fingerprint"): query["fp"] = utls["fingerprint"]
                 else:
-                    query["security"] = "tls"
+                    query["security"] = "none"
 
-                if "server_name" in tls:
-                    query["sni"] = tls["server_name"]
-                utls = tls.get("utls", {})
-                if utls.get("fingerprint"):
-                    query["fp"] = utls["fingerprint"]
-            else:
-                query["security"] = "none"
+                vless_links.append(f"vless://{uuid}@{server}:{port}?{urllib.parse.urlencode(query)}#{urllib.parse.quote(tag)}")
 
-            qs = urllib.parse.urlencode(query)
-            tag_encoded = urllib.parse.quote(tag)
-            links.append(f"vless://{uuid}@{server}:{port}?{qs}#{tag_encoded}")
+            elif ob_type in ("hysteria2", "hysteria"):
+                auth = ob.get("password", ob.get("auth_str", ""))
+                tls = ob.get("tls", {})
+                sni = tls.get("server_name", server)
+                q = {"sni": sni}
+                if tls.get("insecure"): q["insecure"] = "1"
+                auth_prefix = f"{auth}@" if auth else ""
+                hy2_links.append(f"hysteria2://{auth_prefix}{server}:{port}/?{urllib.parse.urlencode(q)}#{urllib.parse.quote(tag)}")
     except Exception:
         pass
-    return links
+    return vless_links, hy2_links
 
-def extract_vless_links(raw_text: str) -> List[str]:
-    found = []
-    seen = set()
+def extract_all_links(raw_text: str) -> Tuple[List[str], List[str]]:
+    vless_seen, hy2_seen = set(), set()
+    vless_links, hy2_links = [], []
 
-    def add(item: str):
+    def add_vless(item: str):
         item = item.strip()
-        if item and item not in seen:
-            seen.add(item)
-            found.append(item)
+        if item and item not in vless_seen:
+            vless_seen.add(item)
+            vless_links.append(item)
 
-    for match in VLESS_REGEX.findall(raw_text):
-        add(match)
+    def add_hy2(item: str):
+        item = item.strip()
+        if item and item not in hy2_seen:
+            hy2_seen.add(item)
+            hy2_links.append(item)
+
+    def scan(text: str):
+        for m in VLESS_REGEX.findall(text): add_vless(m)
+        for m in HY2_REGEX.findall(text): add_hy2(m)
+
+    scan(raw_text)
 
     decoded = try_decode_base64(raw_text)
     if decoded:
-        for match in VLESS_REGEX.findall(decoded):
-            add(match)
+        scan(decoded)
         double_decoded = try_decode_base64(decoded)
         if double_decoded:
-            for match in VLESS_REGEX.findall(double_decoded):
-                add(match)
-        for link in parse_singbox_json(decoded):
-            add(link)
-        for link in parse_xray_json(decoded):
-            add(link)
+            scan(double_decoded)
+        sb_v, sb_h = parse_singbox_json(decoded)
+        for l in sb_v: add_vless(l)
+        for l in sb_h: add_hy2(l)
+        xr_v, xr_h = parse_xray_json(decoded)
+        for l in xr_v: add_vless(l)
+        for l in xr_h: add_hy2(l)
 
-    for link in parse_singbox_json(raw_text):
-        add(link)
-    for link in parse_xray_json(raw_text):
-        add(link)
+    sb_v, sb_h = parse_singbox_json(raw_text)
+    for l in sb_v: add_vless(l)
+    for l in sb_h: add_hy2(l)
+    xr_v, xr_h = parse_xray_json(raw_text)
+    for l in xr_v: add_vless(l)
+    for l in xr_h: add_hy2(l)
 
-    return found
+    return vless_links, hy2_links
 
 def decode_remark(link: str) -> str:
     if "#" in link:
@@ -266,13 +296,16 @@ def get_remark(link: str) -> str:
     return "No remark"
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract vless:// links from subscriptions and configs.")
+    parser = argparse.ArgumentParser(description="Extract vless:// and hysteria2:// links from subscriptions and configs.")
     parser.add_argument("source", nargs="?", help="Subscription URL, file path, or raw string")
     parser.add_argument("-o", "--output", help="Output file to save links")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output with node remarks")
     parser.add_argument("-d", "--decode", action="store_true", help="Decode URL-encoded remarks in #fragment")
     parser.add_argument("-k", "--insecure", action="store_true", help="Skip SSL certificate validation")
     parser.add_argument("--hwid", help="Custom HWID identifier")
+    parser.add_argument("--hy2", action="store_true", help="Include Hysteria 2 (hy2) links")
+    parser.add_argument("--hy2-only", action="store_true", help="Extract only Hysteria 2 (hy2) links")
+    parser.add_argument("--all", action="store_true", help="Extract all supported links (VLESS + Hysteria 2)")
     parser.add_argument("--pause", action="store_true", help="Wait for Enter before exiting")
     args = parser.parse_args()
 
@@ -285,7 +318,7 @@ def main():
         else:
             is_interactive = True
             print("==================================================")
-            print("          VLESS Link Extractor (Python)           ")
+            print("       VLESS & Hysteria 2 Extractor (Python)      ")
             print("==================================================")
             try:
                 raw_input = input("Enter subscription URL or file path: ").strip()
@@ -318,18 +351,33 @@ def main():
         except Exception:
             content = raw_input
 
-    links = extract_vless_links(content)
+    vless_links, hy2_links = extract_all_links(content)
 
-    if not links:
-        print("[-] No vless:// links found.", file=sys.stderr)
+    if args.hy2_only:
+        selected_links = hy2_links
+    elif args.hy2 or args.all:
+        selected_links = vless_links + hy2_links
+    else:
+        if vless_links:
+            selected_links = vless_links
+            if hy2_links:
+                print(f"[*] Note: {len(hy2_links)} Hysteria 2 link(s) also available (use --hy2 or --all to include).", file=sys.stderr)
+        elif hy2_links:
+            print(f"[*] No vless:// links found, displaying {len(hy2_links)} Hysteria 2 link(s):", file=sys.stderr)
+            selected_links = hy2_links
+        else:
+            selected_links = []
+
+    if not selected_links:
+        print("[-] No supported proxy links found.", file=sys.stderr)
         if is_interactive or args.pause:
             input("\nPress Enter to exit...")
         sys.exit(1)
 
-    print(f"[+] Found VLESS links: {len(links)}\n", file=sys.stderr)
+    print(f"[+] Total extracted links: {len(selected_links)}\n", file=sys.stderr)
 
     output_lines = []
-    for i, link in enumerate(links, 1):
+    for i, link in enumerate(selected_links, 1):
         final_link = decode_remark(link) if args.decode else link
         output_lines.append(final_link)
 

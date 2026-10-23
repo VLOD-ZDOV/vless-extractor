@@ -1,17 +1,20 @@
-# VLESS Link Extractor
+# VLESS & Hysteria 2 Link Extractor
 
-A cross-platform utility (Windows & Linux) to extract raw `vless://` links from subscription endpoints, Base64 data, local files, and Sing-Box / Xray JSON configurations.
+A cross-platform utility (Windows & Linux) to extract raw `vless://` and `hysteria2://` links from subscription endpoints, Base64 data, local files, and Sing-Box / Xray JSON configurations.
 
 ## Features
 
-- **Multi-Format Support**:
+- **Multi-Protocol Support**:
+  - `vless://` (VLESS with TCP, Reality, TLS, WebSocket, gRPC, xHTTP)
+  - `hysteria2://` (Hysteria 2 / Hy2 with QUIC, TLS, obfuscation)
+- **Multi-Format Parsing**:
   - Base64-encoded subscription strings
-  - Plain text links
-  - Sing-Box JSON outbounds (`vless`)
-  - Xray / V2Ray JSON configurations (`vnext` + `streamSettings`: Reality, TLS, WebSocket, gRPC, xHTTP)
+  - Plain text proxy lists
+  - Sing-Box JSON outbounds
+  - Xray / V2Ray JSON configurations
 - **Device Attestation (HWID)**: Automatically sends deterministic device headers for panels requiring hardware IDs (e.g. Remnawave), with optional custom HWID support.
-- **Client Emulation**: Uses standard client user-agents to prevent HTTP 502/403 blocks from panels that reject generic browsers.
-- **Zero External Dependencies**: Compiled into a single static binary for Linux and Windows using Go standard library. Python script also included.
+- **Client Emulation**: Emulates standard client user-agents to prevent HTTP 502/403 blocks from panels that reject generic browsers.
+- **Zero External Dependencies**: Single static binary for Linux and Windows using Go standard library. Python script also included.
 
 ---
 
@@ -20,11 +23,17 @@ A cross-platform utility (Windows & Linux) to extract raw `vless://` links from 
 ### Command Line
 
 ```bash
-# Basic extraction
+# Basic extraction (extracts VLESS, auto-falls back to Hysteria 2 if no VLESS present)
 ./vless-extract "https://example.com/sub/token123"
 
+# Include both VLESS and Hysteria 2 links
+./vless-extract -all "https://example.com/sub/token123"
+
+# Extract only Hysteria 2 links
+./vless-extract -hy2-only "https://example.com/sub/token123"
+
 # Save directly to a file
-./vless-extract -o vless.txt "https://example.com/sub/token123"
+./vless-extract -o links.txt "https://example.com/sub/token123"
 
 # Verbose output with node remarks
 ./vless-extract -v "https://example.com/sub/token123"
@@ -44,7 +53,7 @@ curl -s "https://example.com/sub/token123" | ./vless-extract
 ```cmd
 vless-extract.exe "https://example.com/sub/token123"
 ```
-*Note: Double-clicking `vless-extract.exe` launches interactive mode and prompts for the subscription URL.*
+*Note: Double-clicking `vless-extract.exe` launches interactive mode.*
 
 ### Python Script
 
@@ -58,6 +67,9 @@ python3 vless_extract.py "https://example.com/sub/token123"
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
+| `-hy2` | `false` | Include Hysteria 2 links |
+| `-hy2-only` | `false` | Extract only Hysteria 2 links |
+| `-all` | `false` | Extract all supported links (VLESS + Hysteria 2) |
 | `-o <file>` | `""` | Output file path to write extracted links |
 | `-v` | `false` | Verbose output displaying remark and link details |
 | `-d` | `false` | Decode percent-encoded remarks in `#fragment` |

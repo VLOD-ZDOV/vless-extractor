@@ -20,7 +20,10 @@ import (
 	"unicode"
 )
 
-var vlessRegex = regexp.MustCompile(`vless://[^\s"'<>]+`)
+var (
+	vlessRegex = regexp.MustCompile(`vless://[^\s"'<>]+`)
+	hy2Regex   = regexp.MustCompile(`(?:hysteria2|hy2)://[^\s"'<>]+`)
+)
 
 type SingBoxConfig struct {
 	Outbounds []SingBoxOutbound `json:"outbounds"`
@@ -32,6 +35,8 @@ type SingBoxOutbound struct {
 	Server     string                 `json:"server"`
 	ServerPort int                    `json:"server_port"`
 	UUID       string                 `json:"uuid"`
+	Password   string                 `json:"password"`
+	AuthStr    string                 `json:"auth_str"`
 	Flow       string                 `json:"flow"`
 	Network    string                 `json:"network"`
 	TLS        *SingBoxTLS            `json:"tls"`
@@ -42,6 +47,7 @@ type SingBoxTLS struct {
 	Enabled    bool            `json:"enabled"`
 	ServerName string          `json:"server_name"`
 	Insecure   bool            `json:"insecure"`
+	ALPN       []string        `json:"alpn"`
 	UTLS       *SingBoxUTLS    `json:"utls"`
 	Reality    *SingBoxReality `json:"reality"`
 }
@@ -58,12 +64,15 @@ type SingBoxReality struct {
 }
 
 func main() {
-	outputFile := flag.String("o", "", "Output file to save links (e.g. -o vless.txt)")
+	outputFile := flag.String("o", "", "Output file to save links (e.g. -o links.txt)")
 	insecure := flag.Bool("k", false, "Ignore SSL certificate errors")
 	verbose := flag.Bool("v", false, "Verbose output with node remarks and settings")
 	decodeNames := flag.Bool("d", false, "Decode URL-encoded server names in #fragment")
 	pause := flag.Bool("pause", false, "Wait for Enter before exiting")
 	hwidFlag := flag.String("hwid", "", "Custom HWID string (default: persistent hash of URL)")
+	hy2Flag := flag.Bool("hy2", false, "Include/extract Hysteria 2 (hy2) links")
+	hy2Only := flag.Bool("hy2-only", false, "Extract only Hysteria 2 (hy2) links")
+	allFlag := flag.Bool("all", false, "Extract all supported proxy links (VLESS + Hysteria 2)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -85,7 +94,7 @@ func main() {
 	if rawInput == "" {
 		isInteractive = true
 		fmt.Println("==================================================")
-		fmt.Println("          VLESS Link Extractor (CLI)              ")
+		fmt.Println("       VLESS & Hysteria2 Link Extractor (CLI)     ")
 		fmt.Println("==================================================")
 		fmt.Print("Enter subscription URL or file path: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -137,17 +146,37 @@ func main() {
 		content = rawInput
 	}
 
-	links := extractVlessLinks(content)
-	if len(links) == 0 {
-		fmt.Println("[-] No vless:// links found in the provided content.")
+	vlessLinks, hy2Links := extractAllLinks(content)
+
+	var selectedLinks []string
+	if *hy2Only {
+		selectedLinks = hy2Links
+	} else if *hy2Flag || *allFlag {
+		selectedLinks = append(selectedLinks, vlessLinks...)
+		selectedLinks = append(selectedLinks, hy2Links...)
+	} else {
+		// Default: prefer VLESS, but if none found and HY2 is available, auto-fallback
+		if len(vlessLinks) > 0 {
+			selectedLinks = vlessLinks
+			if len(hy2Links) > 0 {
+				fmt.Fprintf(os.Stderr, "[*] Note: %d Hysteria 2 link(s) also available (use -hy2 or -all to include).\n", len(hy2Links))
+			}
+		} else if len(hy2Links) > 0 {
+			fmt.Fprintf(os.Stderr, "[*] No vless:// links found, displaying %d Hysteria 2 link(s):\n", len(hy2Links))
+			selectedLinks = hy2Links
+		}
+	}
+
+	if len(selectedLinks) == 0 {
+		fmt.Println("[-] No supported proxy links found in the provided content.")
 		waitIfInteractive(isInteractive, *pause)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[+] Found VLESS links: %d\n\n", len(links))
+	fmt.Fprintf(os.Stderr, "[+] Total extracted links: %d\n\n", len(selectedLinks))
 
 	var outputLines []string
-	for i, link := range links {
+	for i, link := range selectedLinks {
 		finalLink := link
 		if *decodeNames {
 			finalLink = decodeRemark(link)
@@ -230,41 +259,50 @@ func fetchURL(targetURL string, hwid string, insecure bool) (string, error) {
 	return "", lastErr
 }
 
-func extractVlessLinks(raw string) []string {
-	seen := make(map[string]bool)
-	var result []string
+func extractAllLinks(raw string) ([]string, []string) {
+	seenVless := make(map[string]bool)
+	seenHy2 := make(map[string]bool)
+	var vlessList []string
+	var hy2List []string
 
-	addLink := func(link string) {
-		link = strings.TrimSpace(link)
-		if link == "" || seen[link] {
-			return
+	addVless := func(l string) {
+		l = strings.TrimSpace(l)
+		if l != "" && !seenVless[l] {
+			seenVless[l] = true
+			vlessList = append(vlessList, l)
 		}
-		seen[link] = true
-		result = append(result, link)
 	}
 
-	for _, match := range vlessRegex.FindAllString(raw, -1) {
-		addLink(match)
+	addHy2 := func(l string) {
+		l = strings.TrimSpace(l)
+		if l != "" && !seenHy2[l] {
+			seenHy2[l] = true
+			hy2List = append(hy2List, l)
+		}
 	}
 
-	decoded, ok := tryDecodeBase64(raw)
-	if ok {
-		for _, match := range vlessRegex.FindAllString(decoded, -1) {
-			addLink(match)
+	scanText := func(text string) {
+		for _, m := range vlessRegex.FindAllString(text, -1) {
+			addVless(m)
 		}
+		for _, m := range hy2Regex.FindAllString(text, -1) {
+			addHy2(m)
+		}
+	}
 
+	scanText(raw)
+
+	if decoded, ok := tryDecodeBase64(raw); ok {
+		scanText(decoded)
 		if doubleDecoded, ok2 := tryDecodeBase64(decoded); ok2 {
-			for _, match := range vlessRegex.FindAllString(doubleDecoded, -1) {
-				addLink(match)
-			}
+			scanText(doubleDecoded)
 		}
-
-		extractFromJSON(decoded, addLink)
+		extractFromJSON(decoded, addVless, addHy2)
 	}
 
-	extractFromJSON(raw, addLink)
+	extractFromJSON(raw, addVless, addHy2)
 
-	return result
+	return vlessList, hy2List
 }
 
 func tryDecodeBase64(raw string) (string, bool) {
@@ -314,28 +352,36 @@ func isPrintable(data []byte) bool {
 	return float64(printable)/float64(len(data)) > 0.85
 }
 
-func extractFromJSON(content string, addLink func(string)) {
+func extractFromJSON(content string, addVless func(string), addHy2 func(string)) {
 	trimmed := strings.TrimSpace(content)
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		return
 	}
 
+	// 1. Sing-box
 	var sbConfig SingBoxConfig
 	if err := json.Unmarshal([]byte(content), &sbConfig); err == nil && len(sbConfig.Outbounds) > 0 {
 		for _, ob := range sbConfig.Outbounds {
-			if ob.Type == "vless" && ob.Server != "" && ob.Server != "0.0.0.0" && ob.UUID != "" && ob.UUID != "00000000-0000-0000-0000-000000000000" {
-				link := buildSingBoxVlessURL(ob)
-				if link != "" {
-					addLink(link)
+			if ob.Server == "" || ob.Server == "0.0.0.0" {
+				continue
+			}
+			if ob.Type == "vless" && ob.UUID != "" && ob.UUID != "00000000-0000-0000-0000-000000000000" {
+				if link := buildSingBoxVlessURL(ob); link != "" {
+					addVless(link)
+				}
+			} else if ob.Type == "hysteria2" || ob.Type == "hysteria" {
+				if link := buildSingBoxHy2URL(ob); link != "" {
+					addHy2(link)
 				}
 			}
 		}
 	}
 
-	parseXrayJSON(content, addLink)
+	// 2. Xray
+	parseXrayJSON(content, addVless, addHy2)
 }
 
-func parseXrayJSON(content string, addLink func(string)) {
+func parseXrayJSON(content string, addVless func(string), addHy2 func(string)) {
 	var rawItems []json.RawMessage
 
 	trimmed := strings.TrimSpace(content)
@@ -369,10 +415,6 @@ func parseXrayJSON(content string, addLink func(string)) {
 			}
 
 			proto, _ := ob["protocol"].(string)
-			if proto != "vless" {
-				continue
-			}
-
 			tag, _ := ob["tag"].(string)
 			nodeName := remarks
 			if nodeName == "" {
@@ -380,129 +422,195 @@ func parseXrayJSON(content string, addLink func(string)) {
 			}
 
 			settings, _ := ob["settings"].(map[string]interface{})
-			vnextList, _ := settings["vnext"].([]interface{})
-			if len(vnextList) == 0 {
-				continue
-			}
-
 			streamSettings, _ := ob["streamSettings"].(map[string]interface{})
-			network, _ := streamSettings["network"].(string)
-			if network == "" {
-				network = "tcp"
-			}
-			security, _ := streamSettings["security"].(string)
-			if security == "" {
-				security = "none"
-			}
 
-			for _, vnRaw := range vnextList {
-				vn, ok := vnRaw.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				address, _ := vn["address"].(string)
-				if address == "" || address == "0.0.0.0" {
-					continue
-				}
-
-				port := 443
-				if pNum, ok := vn["port"].(float64); ok && pNum > 0 {
-					port = int(pNum)
-				}
-
-				usersList, _ := vn["users"].([]interface{})
-				for _, uRaw := range usersList {
-					u, ok := uRaw.(map[string]interface{})
-					if !ok {
-						continue
-					}
-
-					uuid, _ := u["id"].(string)
-					if uuid == "" || uuid == "00000000-0000-0000-0000-000000000000" {
-						continue
-					}
-
-					flow, _ := u["flow"].(string)
-					encryption, _ := u["encryption"].(string)
-					if encryption == "" {
-						encryption = "none"
-					}
-
-					q := url.Values{}
-					q.Set("encryption", encryption)
-					if flow != "" {
-						q.Set("flow", flow)
-					}
-					q.Set("type", network)
-					q.Set("security", security)
-
-					if security == "reality" {
-						rs, _ := streamSettings["realitySettings"].(map[string]interface{})
-						if sn, ok := rs["serverName"].(string); ok && sn != "" {
-							q.Set("sni", sn)
-						}
-						if pbk, ok := rs["publicKey"].(string); ok && pbk != "" {
-							q.Set("pbk", pbk)
-						}
-						if sid, ok := rs["shortId"].(string); ok && sid != "" {
-							q.Set("sid", sid)
-						}
-						if fp, ok := rs["fingerprint"].(string); ok && fp != "" {
-							q.Set("fp", fp)
-						}
-						if spx, ok := rs["spiderX"].(string); ok && spx != "" {
-							q.Set("spx", spx)
-						}
-					} else if security == "tls" {
-						ts, _ := streamSettings["tlsSettings"].(map[string]interface{})
-						if sn, ok := ts["serverName"].(string); ok && sn != "" {
-							q.Set("sni", sn)
-						}
-						if fp, ok := ts["fingerprint"].(string); ok && fp != "" {
-							q.Set("fp", fp)
-						}
-					}
-
-					if network == "ws" {
-						ws, _ := streamSettings["wsSettings"].(map[string]interface{})
-						if p, ok := ws["path"].(string); ok && p != "" {
-							q.Set("path", p)
-						}
-						if headers, ok := ws["headers"].(map[string]interface{}); ok {
-							if h, ok := headers["Host"].(string); ok && h != "" {
-								q.Set("host", h)
-							}
-						}
-					} else if network == "grpc" {
-						gs, _ := streamSettings["grpcSettings"].(map[string]interface{})
-						if sn, ok := gs["serviceName"].(string); ok && sn != "" {
-							q.Set("serviceName", sn)
-						}
-					} else if network == "xhttp" || network == "splithttp" {
-						xs, _ := streamSettings["xhttpSettings"].(map[string]interface{})
-						if p, ok := xs["path"].(string); ok && p != "" {
-							q.Set("path", p)
-						}
-						if h, ok := xs["host"].(string); ok && h != "" {
-							q.Set("host", h)
-						}
-						if m, ok := xs["mode"].(string); ok && m != "" {
-							q.Set("mode", m)
-						}
-					}
-
-					finalTag := nodeName
-					if finalTag == "" {
-						finalTag = address
-					}
-
-					link := fmt.Sprintf("vless://%s@%s:%d?%s#%s", uuid, address, port, q.Encode(), url.QueryEscape(finalTag))
-					addLink(link)
-				}
+			if proto == "vless" {
+				parseXrayVlessOutbound(ob, settings, streamSettings, nodeName, addVless)
+			} else if proto == "hysteria" || proto == "hysteria2" {
+				parseXrayHy2Outbound(settings, streamSettings, nodeName, addHy2)
 			}
 		}
 	}
+}
+
+func parseXrayVlessOutbound(ob map[string]interface{}, settings map[string]interface{}, streamSettings map[string]interface{}, nodeName string, addVless func(string)) {
+	vnextList, _ := settings["vnext"].([]interface{})
+	if len(vnextList) == 0 {
+		return
+	}
+
+	network, _ := streamSettings["network"].(string)
+	if network == "" {
+		network = "tcp"
+	}
+	security, _ := streamSettings["security"].(string)
+	if security == "" {
+		security = "none"
+	}
+
+	for _, vnRaw := range vnextList {
+		vn, ok := vnRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		address, _ := vn["address"].(string)
+		if address == "" || address == "0.0.0.0" {
+			continue
+		}
+
+		port := 443
+		if pNum, ok := vn["port"].(float64); ok && pNum > 0 {
+			port = int(pNum)
+		}
+
+		usersList, _ := vn["users"].([]interface{})
+		for _, uRaw := range usersList {
+			u, ok := uRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			uuid, _ := u["id"].(string)
+			if uuid == "" || uuid == "00000000-0000-0000-0000-000000000000" {
+				continue
+			}
+
+			flow, _ := u["flow"].(string)
+			encryption, _ := u["encryption"].(string)
+			if encryption == "" {
+				encryption = "none"
+			}
+
+			q := url.Values{}
+			q.Set("encryption", encryption)
+			if flow != "" {
+				q.Set("flow", flow)
+			}
+			q.Set("type", network)
+			q.Set("security", security)
+
+			if security == "reality" {
+				rs, _ := streamSettings["realitySettings"].(map[string]interface{})
+				if sn, ok := rs["serverName"].(string); ok && sn != "" {
+					q.Set("sni", sn)
+				}
+				if pbk, ok := rs["publicKey"].(string); ok && pbk != "" {
+					q.Set("pbk", pbk)
+				}
+				if sid, ok := rs["shortId"].(string); ok && sid != "" {
+					q.Set("sid", sid)
+				}
+				if fp, ok := rs["fingerprint"].(string); ok && fp != "" {
+					q.Set("fp", fp)
+				}
+				if spx, ok := rs["spiderX"].(string); ok && spx != "" {
+					q.Set("spx", spx)
+				}
+			} else if security == "tls" {
+				ts, _ := streamSettings["tlsSettings"].(map[string]interface{})
+				if sn, ok := ts["serverName"].(string); ok && sn != "" {
+					q.Set("sni", sn)
+				}
+				if fp, ok := ts["fingerprint"].(string); ok && fp != "" {
+					q.Set("fp", fp)
+				}
+			}
+
+			if network == "ws" {
+				ws, _ := streamSettings["wsSettings"].(map[string]interface{})
+				if p, ok := ws["path"].(string); ok && p != "" {
+					q.Set("path", p)
+				}
+				if headers, ok := ws["headers"].(map[string]interface{}); ok {
+					if h, ok := headers["Host"].(string); ok && h != "" {
+						q.Set("host", h)
+					}
+				}
+			} else if network == "grpc" {
+				gs, _ := streamSettings["grpcSettings"].(map[string]interface{})
+				if sn, ok := gs["serviceName"].(string); ok && sn != "" {
+					q.Set("serviceName", sn)
+				}
+			} else if network == "xhttp" || network == "splithttp" {
+				xs, _ := streamSettings["xhttpSettings"].(map[string]interface{})
+				if p, ok := xs["path"].(string); ok && p != "" {
+					q.Set("path", p)
+				}
+				if h, ok := xs["host"].(string); ok && h != "" {
+					q.Set("host", h)
+				}
+				if m, ok := xs["mode"].(string); ok && m != "" {
+					q.Set("mode", m)
+				}
+			}
+
+			finalTag := nodeName
+			if finalTag == "" {
+				finalTag = address
+			}
+
+			link := fmt.Sprintf("vless://%s@%s:%d?%s#%s", uuid, address, port, q.Encode(), url.QueryEscape(finalTag))
+			addVless(link)
+		}
+	}
+}
+
+func parseXrayHy2Outbound(settings map[string]interface{}, streamSettings map[string]interface{}, nodeName string, addHy2 func(string)) {
+	address, _ := settings["address"].(string)
+	if address == "" || address == "0.0.0.0" {
+		return
+	}
+
+	port := 443
+	if pNum, ok := settings["port"].(float64); ok && pNum > 0 {
+		port = int(pNum)
+	}
+
+	auth := ""
+	if hs, ok := streamSettings["hysteriaSettings"].(map[string]interface{}); ok {
+		if a, ok := hs["auth"].(string); ok {
+			auth = a
+		}
+	}
+	if auth == "" {
+		if a, ok := settings["auth"].(string); ok {
+			auth = a
+		}
+	}
+
+	q := url.Values{}
+	sni := address
+	if ts, ok := streamSettings["tlsSettings"].(map[string]interface{}); ok {
+		if sn, ok := ts["serverName"].(string); ok && sn != "" {
+			sni = sn
+		}
+		if alpnList, ok := ts["alpn"].([]interface{}); ok && len(alpnList) > 0 {
+			var alpns []string
+			for _, a := range alpnList {
+				if s, ok := a.(string); ok {
+					alpns = append(alpns, s)
+				}
+			}
+			if len(alpns) > 0 {
+				q.Set("alpn", strings.Join(alpns, ","))
+			}
+		}
+	}
+	q.Set("sni", sni)
+
+	tag := nodeName
+	if tag == "" {
+		tag = address
+	}
+
+	authPrefix := ""
+	if auth != "" {
+		authPrefix = auth + "@"
+	}
+
+	link := fmt.Sprintf("hysteria2://%s%s:%d/?%s#%s", authPrefix, address, port, q.Encode(), url.QueryEscape(tag))
+	addHy2(link)
 }
 
 func buildSingBoxVlessURL(ob SingBoxOutbound) string {
@@ -567,6 +675,40 @@ func buildSingBoxVlessURL(ob SingBoxOutbound) string {
 	}
 
 	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", ob.UUID, ob.Server, port, q.Encode(), url.QueryEscape(tag))
+}
+
+func buildSingBoxHy2URL(ob SingBoxOutbound) string {
+	q := url.Values{}
+	sni := ob.Server
+	if ob.TLS != nil && ob.TLS.ServerName != "" {
+		sni = ob.TLS.ServerName
+	}
+	q.Set("sni", sni)
+	if ob.TLS != nil && ob.TLS.Insecure {
+		q.Set("insecure", "1")
+	}
+
+	auth := ob.Password
+	if auth == "" {
+		auth = ob.AuthStr
+	}
+
+	tag := ob.Tag
+	if tag == "" {
+		tag = ob.Server
+	}
+
+	port := ob.ServerPort
+	if port == 0 {
+		port = 443
+	}
+
+	authPrefix := ""
+	if auth != "" {
+		authPrefix = auth + "@"
+	}
+
+	return fmt.Sprintf("hysteria2://%s%s:%d/?%s#%s", authPrefix, ob.Server, port, q.Encode(), url.QueryEscape(tag))
 }
 
 func extractRemark(link string) string {
